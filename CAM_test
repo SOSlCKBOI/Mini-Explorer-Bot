@@ -1,4 +1,4 @@
-#define WIFI_SSID "test"
+#define WIFI_SSID "Pony"
 #define WIFI_PASS "knuttamon0002"
 #define HOSTNAME "esp32cam"
 
