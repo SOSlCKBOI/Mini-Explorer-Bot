@@ -4,33 +4,31 @@
 Adafruit_AMG88xx amg;
 
 void setup() {
-    Serial.begin(9600);
-    Serial.println(F("AMG88xx test"));
+  Serial.begin(115200);
 
-    bool status;
-    
-    // default settings
-    status = amg.begin();
-    if (!status) {
-        Serial.println("Could not find a valid AMG88xx sensor, check wiring!");
-        while (1);
-    }
-    
-    Serial.println("-- Thermistor Test --");
+  // ใช้ SDA กับ SCL ที่ GPIO 13 และ GPIO 14
+  Wire.begin(13, 14);
 
-    Serial.println();
+  if (!amg.begin(0x68)) {
+    Serial.println("Could not find a valid AMG88xx sensor, check wiring!");
+    while (1);
+  }
 
-    delay(100); // let sensor boot up
+  Serial.println("AMG88xx sensor found!");
 }
 
-
-void loop() { 
-    Serial.print("Thermistor Temperature = ");
-    Serial.print(amg.readThermistor());
-    Serial.println(" *C");
+void loop() {
+  float pixels[AMG88xx_PIXEL_ARRAY_SIZE];
   
-    Serial.println();
+  // อ่านข้อมูลจากเซ็นเซอร์
+  amg.readPixels(pixels);
 
-    //delay a second
-    delay(1000);
+  // แสดงข้อมูลอุณหภูมิของแต่ละพิกเซล
+  for (uint16_t i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++) {
+    if (i % 8 == 0) Serial.println(); // ขึ้นบรรทัดใหม่ทุก 8 พิกเซล
+    Serial.print(pixels[i], 2);
+    Serial.print(" ");
+  }
+Serial.print("\n------------------------------");
+  delay(500); // หน่วงเวลา 500ms ก่อนอ่านข้อมูลใหม่
 }
