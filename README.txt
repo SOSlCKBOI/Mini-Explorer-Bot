@@ -1,6 +1,6 @@
 วิธีทดสอบอินฟาเรดกับESP32-CAM
 **open arduino**
-tools > boards manager > install esp32
+tools > boards manager > install esp32 > install Adafruit amg88xx
 tools > boards > esp32S3 Dev Module
 tools > PSRAM > OPI PSRAM 
 
