@@ -1,0 +1,363 @@
+#include "esp_camera.h"
+#include <WiFi.h>
+#include "esp_timer.h"
+#include "img_converters.h"
+#include "Arduino.h"
+#include "fb_gfx.h"
+#include "esp_http_server.h"
+#include <Wire.h>
+#include <Adafruit_AMG88xx.h>
+
+// ตั้งค่าพอร์ต Wi-Fi
+const char* ssid = "Lucky";  // ชื่อ Wi-Fi
+const char* password = "123456789";  // รหัสผ่าน Wi-Fi
+
+// ตั้งค่าพินของกล้อง
+#define PART_BOUNDARY "123456789000000000000987654321"  // ขอบเขตของ multipart
+
+#define PWDN_GPIO_NUM     -1  // ไม่ใช้พินนี้
+#define RESET_GPIO_NUM    -1  // ไม่ใช้พินนี้
+#define XCLK_GPIO_NUM      15  // พิน XCLK
+#define SIOD_GPIO_NUM     4   // พิน SDA
+#define SIOC_GPIO_NUM     5   // พิน SCL
+#define Y9_GPIO_NUM       16  // พิน Y9
+#define Y8_GPIO_NUM       17  // พิน Y8
+#define Y7_GPIO_NUM       18  // พิน Y7
+#define Y6_GPIO_NUM       12  // พิน Y6
+#define Y5_GPIO_NUM       10  // พิน Y5
+#define Y4_GPIO_NUM       8   // พิน Y4
+#define Y3_GPIO_NUM       9   // พิน Y3
+#define Y2_GPIO_NUM        11  // พิน Y2
+#define VSYNC_GPIO_NUM    6   // พิน VSYNC
+#define HREF_GPIO_NUM     7   // พิน HREF
+#define PCLK_GPIO_NUM     13  // พิน PCLK
+
+// ตั้งค่าพินของมอเตอร์
+#define MOTOR_1_PIN_1    39  // พินของมอเตอร์ 1 ขั้ว 1
+#define MOTOR_1_PIN_2    40  // พินของมอเตอร์ 1 ขั้ว 2
+#define MOTOR_2_PIN_1    42  // พินของมอเตอร์ 2 ขั้ว 1
+#define MOTOR_2_PIN_2    41  // พินของมอเตอร์ 2 ขั้ว 2
+
+// ตั้งค่า Buzzer และเซนเซอร์ AMG8833
+#define BUZZER_PIN 14 // พิน Buzzer
+#define TEMP_HIGH_THRESHOLD 38.0 // อุณหภูมิสูงสุดที่กำหนด
+#define TEMP_LOW_THRESHOLD 10.0  // อุณหภูมิต่ำสุดที่กำหนด
+
+Adafruit_AMG88xx amg;  // สร้างตัวแปรสำหรับเซนเซอร์ AMG8833
+
+// ตั้งค่ากล้องและ HTTP Server
+static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY; // การตั้งค่า Content-Type
+static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n"; // ขอบเขตของ stream
+static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n"; // ขนาดของภาพใน stream
+httpd_handle_t camera_httpd = NULL;  // ตัวแปรสำหรับ HTTP Server
+httpd_handle_t stream_httpd = NULL;  // ตัวแปรสำหรับ Stream Server
+
+// หน้า HTML สำหรับแสดงผล
+static const char PROGMEM INDEX_HTML[] = R"rawliteral(
+<html>
+  <head>
+    <title>ESP32-CAM Robot</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      body { font-family: Arial; text-align: center; margin:0px auto; padding-top: 30px;}
+      table { margin-left: auto; margin-right: auto; }
+      td { padding: 8 px; }
+      .button {
+        background-color: #2f4468;
+        border: none;
+        color: white;
+        padding: 10px 20px;
+        text-align: center;
+        text-decoration: none;
+        display: inline-block;
+        font-size: 18px;
+        margin: 6px 3px;
+        cursor: pointer;
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        -khtml-user-select: none;
+        -moz-user-select: none;
+        -ms-user-select: none;
+        user-select: none;
+        -webkit-tap-highlight-color: rgba(0,0,0,0);
+      }
+      img {  width: auto ;
+        max-width: 100% ;
+        height: auto ; 
+      }
+    </style>
+  </head>
+  <body>
+    <h1>ESP32-CAM Robot</h1>
+    <img src="" id="photo" >
+    <table>
+      <tr><td colspan="3" align="center"><button class="button" onmousedown="toggleCheckbox('forward');" ontouchstart="toggleCheckbox('forward');" onmouseup="toggleCheckbox('stop');" ontouchend="toggleCheckbox('stop');">Forward</button></td></tr>
+      <tr><td align="center"><button class="button" onmousedown="toggleCheckbox('left');" ontouchstart="toggleCheckbox('left');" onmouseup="toggleCheckbox('stop');" ontouchend="toggleCheckbox('stop');">Left</button></td><td align="center"><button class="button" onmousedown="toggleCheckbox('stop');" ontouchstart="toggleCheckbox('stop');">Stop</button></td><td align="center"><button class="button" onmousedown="toggleCheckbox('right');" ontouchstart="toggleCheckbox('right');" onmouseup="toggleCheckbox('stop');" ontouchend="toggleCheckbox('stop');">Right</button></td></tr>
+      <tr><td colspan="3" align="center"><button class="button" onmousedown="toggleCheckbox('backward');" ontouchstart="toggleCheckbox('backward');" onmouseup="toggleCheckbox('stop');" ontouchend="toggleCheckbox('stop');">Backward</button></td></tr>                   
+    </table>
+   <script>
+   function toggleCheckbox(x) {
+     var xhr = new XMLHttpRequest();
+     xhr.open("GET", "/action?go=" + x, true); // ส่งคำสั่งไปยังเซิร์ฟเวอร์
+     xhr.send();
+   }
+   window.onload = document.getElementById("photo").src = window.location.href.slice(0, -1) + ":81/stream"; // เรียกดูภาพจากกล้อง
+  </script>
+  </body>
+</html>
+)rawliteral";
+
+// ฟังก์ชันที่ใช้ในการดึงหน้า HTML หลัก
+static esp_err_t index_handler(httpd_req_t *req){
+  httpd_resp_set_type(req, "text/html");  // กำหนดประเภทของการตอบกลับเป็น HTML
+  return httpd_resp_send(req, (const char *)INDEX_HTML, strlen(INDEX_HTML));  // ส่งหน้า HTML ให้กับผู้ใช้งาน
+}
+
+// ฟังก์ชันที่ใช้ในการส่งสตรีมภาพจากกล้อง
+static esp_err_t stream_handler(httpd_req_t *req){
+  camera_fb_t * fb = NULL;  // ตัวแปรสำหรับเก็บข้อมูลเฟรมจากกล้อง
+  esp_err_t res = ESP_OK;   // สถานะการประมวลผล
+  size_t _jpg_buf_len = 0;  // ความยาวของบัฟเฟอร์ภาพ
+  uint8_t * _jpg_buf = NULL; // บัฟเฟอร์ภาพ JPEG
+  char * part_buf[64];      // ตัวแปรสำหรับจัดการส่วนของข้อมูลภาพ
+
+  res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);  // กำหนดประเภทการตอบกลับ
+  if(res != ESP_OK){  // ถ้าการตั้งค่าการตอบกลับไม่สำเร็จ
+    return res;  // ส่งสถานะผิดพลาด
+  }
+
+  while(true){  // ลูปเพื่อส่งภาพแบบสตรีม
+    fb = esp_camera_fb_get();  // ดึงเฟรมภาพจากกล้อง
+    if (!fb) {  // ถ้าไม่สามารถดึงภาพได้
+      Serial.println("Camera capture failed");  // แสดงข้อความข้อผิดพลาด
+      res = ESP_FAIL;  // กำหนดสถานะเป็นล้มเหลว
+    } else {
+      if(fb->width > 400){  // ถ้าความกว้างของภาพมากกว่า 400 พิกเซล
+        if(fb->format != PIXFORMAT_JPEG){  // ถ้าไม่ใช่ภาพ JPEG
+          bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);  // แปลงภาพเป็น JPEG
+          esp_camera_fb_return(fb);  // คืนค่าหน่วยความจำของเฟรม
+          fb = NULL;  // รีเซ็ตตัวแปรเฟรม
+          if(!jpeg_converted){  // ถ้าการแปลงเป็น JPEG ล้มเหลว
+            Serial.println("JPEG compression failed");  // แสดงข้อความข้อผิดพลาด
+            res = ESP_FAIL;  // กำหนดสถานะเป็นล้มเหลว
+          }
+        } else {
+          _jpg_buf_len = fb->len;  // กำหนดความยาวของภาพ
+          _jpg_buf = fb->buf;      // กำหนดบัฟเฟอร์ของภาพ
+        }
+      }
+    }
+    if(res == ESP_OK){  // ถ้าทุกอย่างสำเร็จ
+      size_t hlen = snprintf((char *)part_buf, 64, _STREAM_PART, _jpg_buf_len);  // เตรียมส่วนหัวของภาพ
+      res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);  // ส่งส่วนหัวไป
+    }
+    if(res == ESP_OK){  // ถ้าการส่งส่วนหัวสำเร็จ
+      res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);  // ส่งภาพ JPEG ไป
+    }
+    if(res == ESP_OK){  // ถ้าการส่งภาพสำเร็จ
+      res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));  // ส่งขอบเขตของสตรีม
+    }
+    if(fb){  // ถ้ามีเฟรม
+      esp_camera_fb_return(fb);  // คืนค่าหน่วยความจำ
+      fb = NULL;  // รีเซ็ตตัวแปรเฟรม
+      _jpg_buf = NULL;  // รีเซ็ตตัวแปรบัฟเฟอร์ภาพ
+    } else if(_jpg_buf){  // ถ้ามีบัฟเฟอร์ JPEG
+      free(_jpg_buf);  // คืนค่าหน่วยความจำของบัฟเฟอร์
+      _jpg_buf = NULL;  // รีเซ็ตตัวแปรบัฟเฟอร์
+    }
+    if(res != ESP_OK){  // ถ้ามีข้อผิดพลาด
+      break;  // ออกจากลูป
+    }
+  }
+  return res;  // ส่งสถานะการประมวลผล
+}
+
+// ฟังก์ชันที่ใช้จัดการคำสั่งจากผู้ใช้
+static esp_err_t cmd_handler(httpd_req_t *req){
+  char*  buf;
+  size_t buf_len;
+  char variable[32] = {0,};  // ตัวแปรเก็บคำสั่ง
+
+  buf_len = httpd_req_get_url_query_len(req) + 1;  // หาความยาวของคำขอ
+  if (buf_len > 1) {  // ถ้ามีข้อมูลในคำขอ
+    buf = (char*)malloc(buf_len);  // จองหน่วยความจำสำหรับข้อมูลคำขอ
+    if(!buf){  // ถ้าไม่สามารถจองหน่วยความจำได้
+      httpd_resp_send_500(req);  // ส่งข้อผิดพลาด
+      return ESP_FAIL;  // ส่งสถานะผิดพลาด
+    }
+    if (httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {  // อ่านข้อมูลจากคำขอ
+      if (httpd_query_key_value(buf, "go", variable, sizeof(variable)) == ESP_OK) {  // ตรวจสอบคำสั่ง
+      } else {
+        free(buf);  // คืนค่าหน่วยความจำ
+        httpd_resp_send_404(req);  // ส่งข้อผิดพลาด 404
+        return ESP_FAIL;  // ส่งสถานะผิดพลาด
+      }
+    } else {
+      free(buf);  // คืนค่าหน่วยความจำ
+      httpd_resp_send_404(req);  // ส่งข้อผิดพลาด 404
+      return ESP_FAIL;  // ส่งสถานะผิดพลาด
+    }
+    free(buf);  // คืนค่าหน่วยความจำ
+  } else {
+    httpd_resp_send_404(req);  // ส่งข้อผิดพลาด 404
+    return ESP_FAIL;  // ส่งสถานะผิดพลาด
+  }
+
+  sensor_t * s = esp_camera_sensor_get();  // ดึงข้อมูลเซ็นเซอร์จากกล้อง
+  int res = 0;
+
+  if(!strcmp(variable, "forward")) {  // ถ้าคำสั่งเป็น "forward"
+    digitalWrite(MOTOR_1_PIN_1, 1);  // มอเตอร์ 1 หมุนไปข้างหน้า
+    digitalWrite(MOTOR_1_PIN_2, 0);
+    digitalWrite(MOTOR_2_PIN_1, 1);  // มอเตอร์ 2 หมุนไปข้างหน้า
+    digitalWrite(MOTOR_2_PIN_2, 0);
+  }
+  else if(!strcmp(variable, "left")) {  // ถ้าคำสั่งเป็น "left"
+    digitalWrite(MOTOR_1_PIN_1, 0);  // มอเตอร์ 1 หมุนไปซ้าย
+    digitalWrite(MOTOR_1_PIN_2, 1);
+    digitalWrite(MOTOR_2_PIN_1, 1);  // มอเตอร์ 2 หมุนไปขวา
+    digitalWrite(MOTOR_2_PIN_2, 0);
+  }
+  else if(!strcmp(variable, "right")) {  // ถ้าคำสั่งเป็น "right"
+    digitalWrite(MOTOR_1_PIN_1, 1);  // มอเตอร์ 1 หมุนไปขวา
+    digitalWrite(MOTOR_1_PIN_2, 0);
+    digitalWrite(MOTOR_2_PIN_1, 0);  // มอเตอร์ 2 หมุนไปซ้าย
+    digitalWrite(MOTOR_2_PIN_2, 1);
+  }
+  else if(!strcmp(variable, "backward")) {  // ถ้าคำสั่งเป็น "backward"
+    digitalWrite(MOTOR_1_PIN_1, 0);  // มอเตอร์ 1 หมุนถอยหลัง
+    digitalWrite(MOTOR_1_PIN_2, 1);
+    digitalWrite(MOTOR_2_PIN_1, 0);  // มอเตอร์ 2 หมุนถอยหลัง
+    digitalWrite(MOTOR_2_PIN_2, 1);
+  }
+  else if(!strcmp(variable, "stop")) {  // ถ้าคำสั่งเป็น "stop"
+    digitalWrite(MOTOR_1_PIN_1, 0);  // หยุดมอเตอร์
+    digitalWrite(MOTOR_1_PIN_2, 0);
+    digitalWrite(MOTOR_2_PIN_1, 0);
+    digitalWrite(MOTOR_2_PIN_2, 0);
+  }
+
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");  // กำหนดการอนุญาต CORS
+  return httpd_resp_send(req, NULL, 0);  // ส่งคำตอบกลับ
+}
+
+// ฟังก์ชันเริ่มต้นเซิร์ฟเวอร์ HTTP
+void startCameraServer(){
+  httpd_config_t config = HTTPD_DEFAULT_CONFIG();  // กำหนดการตั้งค่าเซิร์ฟเวอร์ HTTP
+  config.server_port = 80;  // ตั้งค่าพอร์ตของเซิร์ฟเวอร์
+  httpd_uri_t index_uri = {
+    .uri       = "/",
+    .method    = HTTP_GET,
+    .handler   = index_handler,
+    .user_ctx  = NULL
+  };
+
+  httpd_uri_t cmd_uri = {
+    .uri       = "/action",
+    .method    = HTTP_GET,
+    .handler   = cmd_handler,
+    .
+
+user_ctx  = NULL
+  };
+
+  httpd_uri_t stream_uri = {
+    .uri       = "/stream",
+    .method    = HTTP_GET,
+    .handler   = stream_handler,
+    .user_ctx  = NULL
+  };
+
+  if (httpd_start(&camera_httpd, &config) == ESP_OK) {
+    httpd_register_uri_handler(camera_httpd, &index_uri);  // ลงทะเบียน URI สำหรับหน้าเว็บ
+    httpd_register_uri_handler(camera_httpd, &cmd_uri);    // ลงทะเบียน URI สำหรับคำสั่ง
+  }
+
+  if (httpd_start(&stream_httpd, &config) == ESP_OK) {
+    httpd_register_uri_handler(stream_httpd, &stream_uri);  // ลงทะเบียน URI สำหรับสตรีมภาพ
+  }
+}
+
+// ฟังก์ชัน setup ที่จะเริ่มต้นการตั้งค่าทุกอย่าง
+void setup() {
+  Serial.begin(115200);  // เริ่มต้นการเชื่อมต่อ Serial
+  
+  pinMode(MOTOR_1_PIN_1, OUTPUT);  // ตั้งค่าพินมอเตอร์ 1 ขั้ว 1
+  pinMode(MOTOR_1_PIN_2, OUTPUT);  // ตั้งค่าพินมอเตอร์ 1 ขั้ว 2
+  pinMode(MOTOR_2_PIN_1, OUTPUT);  // ตั้งค่าพินมอเตอร์ 2 ขั้ว 1
+  pinMode(MOTOR_2_PIN_2, OUTPUT);  // ตั้งค่าพินมอเตอร์ 2 ขั้ว 2
+  pinMode(BUZZER_PIN, OUTPUT);     // ตั้งค่าพิน Buzzer
+  
+  WiFi.begin(ssid, password);  // เชื่อมต่อกับ Wi-Fi
+  while (WiFi.status() != WL_CONNECTED) {  // รอจนกว่า Wi-Fi จะเชื่อมต่อสำเร็จ
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected");  // แสดงข้อความเมื่อเชื่อมต่อ Wi-Fi สำเร็จ
+  
+  camera_config_t config;  // กำหนดค่ากล้อง
+  config.ledc_channel = LEDC_CHANNEL_0;  // ช่อง LEDC
+  config.ledc_timer = LEDC_TIMER_0;  // ตั้งเวลา LEDC
+  config.pin_d0 = Y2_GPIO_NUM;  // พิน D0
+  config.pin_d1 = Y3_GPIO_NUM;  // พิน D1
+  config.pin_d2 = Y4_GPIO_NUM;  // พิน D2
+  config.pin_d3 = Y5_GPIO_NUM;  // พิน D3
+  config.pin_d4 = Y6_GPIO_NUM;  // พิน D4
+  config.pin_d5 = Y7_GPIO_NUM;  // พิน D5
+  config.pin_d6 = Y8_GPIO_NUM;  // พิน D6
+  config.pin_d7 = Y9_GPIO_NUM;  // พิน D7
+  config.pin_xclk = XCLK_GPIO_NUM;  // พิน XCLK
+  config.pin_pclk = PCLK_GPIO_NUM;  // พิน PCLK
+  config.pin_vsync = VSYNC_GPIO_NUM;  // พิน VSYNC
+  config.pin_href = HREF_GPIO_NUM;  // พิน HREF
+  config.pin_sscb_sda = SIOD_GPIO_NUM;  // พิน SDA
+  config.pin_sscb_scl = SIOC_GPIO_NUM;  // พิน SCL
+  config.pin_pwdn = PWDN_GPIO_NUM;  // พิน PWDN
+  config.pin_reset = RESET_GPIO_NUM;  // พิน RESET
+  config.xclk_freq_hz = 20000000;  // ความถี่ XCLK
+  config.frame_size = FRAMESIZE_VGA;  // ขนาดภาพ
+  config.jpeg_quality = 12;  // คุณภาพของภาพ JPEG
+  config.fb_count = 1;  // จำนวนเฟรมบัฟเฟอร์
+  
+  if (esp_camera_init(&config) != ESP_OK) {  // ถ้าการเริ่มต้นกล้องล้มเหลว
+    Serial.println("Camera initialization failed!");  // แสดงข้อความข้อผิดพลาด
+    return;
+  }
+
+  startCameraServer();  // เริ่มต้นเซิร์ฟเวอร์กล้อง
+  
+  Wire.begin();  // เริ่มต้นการเชื่อมต่อ I2C
+  if (!amg.begin()) {  // ถ้าไม่สามารถเชื่อมต่อกับเซนเซอร์ AMG8833
+    Serial.println("Failed to initialize AMG8833!");  // แสดงข้อความข้อผิดพลาด
+    while (1);  // หยุดโปรแกรม
+  }
+  Serial.println("AMG8833 Initialized!");  // แสดงข้อความว่าเซนเซอร์ AMG8833 ได้รับการตั้งค่าแล้ว
+}
+
+void loop() {
+  // ตรวจสอบอุณหภูมิจากเซนเซอร์ AMG8833 และแจ้งเตือนเมื่ออุณหภูมิสูงหรือต่ำกว่าค่าที่กำหนด
+  float pixels[64];  // ตัวแปรเก็บค่าอุณหภูมิจากเซนเซอร์
+  amg.readPixels(pixels);  // อ่านค่าจากเซนเซอร์
+  
+  float maxTemp = -100, minTemp = 100;  // กำหนดอุณหภูมิสูงสุดและต่ำสุดเริ่มต้น
+  for (int i = 0; i < 64; i++) {  // ลูปอ่านค่าจากแต่ละพิกเซล
+    if (pixels[i] > maxTemp) maxTemp = pixels[i];  // อัปเดตอุณหภูมิสูงสุด
+    if (pixels[i] < minTemp) minTemp = pixels[i];  // อัปเดตอุณหภูมิต่ำสุด
+  }
+
+  // แสดงอุณหภูมิสูงสุดและต่ำสุดใน Serial Monitor
+  Serial.print("Max Temp: ");
+  Serial.print(maxTemp);
+  Serial.print("C, Min Temp: ");
+  Serial.print(minTemp);
+  Serial.println("C");
+
+  if (maxTemp > TEMP_HIGH_THRESHOLD || minTemp < TEMP_LOW_THRESHOLD) {  // ถ้าอุณหภูมิสูงหรือต่ำกว่าค่าที่กำหนด
+    digitalWrite(BUZZER_PIN, HIGH);  // เปิด Buzzer
+    Serial.println("Temperature Alert! Buzzer Activated!");  // แสดงข้อความแจ้งเตือน
+  } else {
+    digitalWrite(BUZZER_PIN, LOW);  // ปิด Buzzer
+  }
+
+  delay(1000);  // หน่วงเวลา 1 วินาที
+}
