@@ -92,6 +92,29 @@ static const char PROGMEM INDEX_HTML[] = R"rawliteral(
       <tr><td align="center"><button class="button" onmousedown="toggleCheckbox('left');" ontouchstart="toggleCheckbox('left');" onmouseup="toggleCheckbox('stop');" ontouchend="toggleCheckbox('stop');">Left</button></td><td align="center"><button class="button" onmousedown="toggleCheckbox('stop');" ontouchstart="toggleCheckbox('stop');">Stop</button></td><td align="center"><button class="button" onmousedown="toggleCheckbox('right');" ontouchstart="toggleCheckbox('right');" onmouseup="toggleCheckbox('stop');" ontouchend="toggleCheckbox('stop');">Right</button></td></tr>
       <tr><td colspan="3" align="center"><button class="button" onmousedown="toggleCheckbox('backward');" ontouchstart="toggleCheckbox('backward');" onmouseup="toggleCheckbox('stop');" ontouchend="toggleCheckbox('stop');">Backward</button></td></tr>                   
     </table>
+    <h2>Temperature Data</h2>
+<div id="sensorData"></div>
+
+<script>
+  function fetchSensorData() {
+    fetch("/sensor")
+      .then(response => response.json())
+      .then(data => {
+        let table = "<table border='1' style='margin:auto;'>";
+        for (let i = 0; i < data.length; i++) {
+          if (i % 8 === 0) table += "<tr>";
+          table += `<td style="padding:5px;">${data[i]}°C</td>`;
+          if (i % 8 === 7) table += "</tr>";
+        }
+        table += "</table>";
+        document.getElementById("sensorData").innerHTML = table;
+      })
+      .catch(error => console.error("Error fetching sensor data:", error));
+  }
+
+  setInterval(fetchSensorData, 1000); // อัปเดตข้อมูลทุก 1 วินาที
+</script>
+
    <script>
    function toggleCheckbox(x) {
      var xhr = new XMLHttpRequest();
@@ -290,11 +313,33 @@ static esp_err_t cmd_handler(httpd_req_t *req)
   return httpd_resp_send(req, NULL, 0);
 }
 
-//
+// อ่านค่าจากเซ็นเซอร์ AMG88xx และส่งเป็น JSON
+static esp_err_t sensor_handler(httpd_req_t *req)
+{
+  float pixels[AMG88xx_PIXEL_ARRAY_SIZE];
+  amg.readPixels(pixels);
+
+  String json = "[";
+  for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; i++)
+  {
+    json += String(pixels[i], 2);
+    if (i < AMG88xx_PIXEL_ARRAY_SIZE - 1)
+    {
+      json += ",";
+    }
+  }
+  json += "]";
+
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, json.c_str(), json.length());
+}
+
+// เพิ่มเส้นทาง API สำหรับเซ็นเซอร์
 void startCameraServer()
 {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 80;
+
   httpd_uri_t index_uri = {
       .uri = "/",
       .method = HTTP_GET,
@@ -306,16 +351,26 @@ void startCameraServer()
       .method = HTTP_GET,
       .handler = cmd_handler,
       .user_ctx = NULL};
+
   httpd_uri_t stream_uri = {
       .uri = "/stream",
       .method = HTTP_GET,
       .handler = stream_handler,
       .user_ctx = NULL};
+
+  httpd_uri_t sensor_uri = {
+      .uri = "/sensor",
+      .method = HTTP_GET,
+      .handler = sensor_handler,
+      .user_ctx = NULL};
+
   if (httpd_start(&camera_httpd, &config) == ESP_OK)
   {
     httpd_register_uri_handler(camera_httpd, &index_uri);
     httpd_register_uri_handler(camera_httpd, &cmd_uri);
+    httpd_register_uri_handler(camera_httpd, &sensor_uri);
   }
+
   config.server_port += 1;
   config.ctrl_port += 1;
   if (httpd_start(&stream_httpd, &config) == ESP_OK)
